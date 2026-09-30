@@ -22,18 +22,68 @@ func (p *Plant) SubmitAeration(ctx context.Context, lineID model.LineID, basinID
 	return p.aeration.SubmitWindow(ctx, lineID, basinID, payload, state.Generation, p.now())
 }
 
-func (p *Plant) ChangeDose(ctx context.Context, lineID model.LineID, batchID uuid.UUID, chemical string, rate float64) (model.DeviceCommand, error) {
+func (p *Plant) SubmitDose(ctx context.Context, lineID model.LineID, batchID uuid.UUID, chemical string, rate float64, operator, note string) (dosing.SubmitResult, error) {
 	p.mu.RLock()
 	state, ok := p.lines[lineID]
 	p.mu.RUnlock()
 	if !ok || state.Emergency {
-		return model.DeviceCommand{}, errors.New("process line cannot change dosing")
+		return dosing.SubmitResult{}, errors.New("process line cannot change dosing")
 	}
-	change, err := dosing.NewChange(lineID, batchID, chemical, rate, state.Generation, p.now())
-	if err != nil {
-		return model.DeviceCommand{}, err
+	return p.dosing.Submit(ctx, dosing.SubmitInput{
+		LineID:      lineID,
+		BatchID:     batchID,
+		Chemical:    chemical,
+		Rate:        rate,
+		Generation:  state.Generation,
+		RequestedBy: operator,
+		Note:        note,
+	}, p.now())
+}
+
+// ReviewDose 审核高风险剂量变更。批准的变更在此刻才进入设备总线。
+func (p *Plant) ReviewDose(ctx context.Context, requestID uuid.UUID, approved bool, reviewer, note string) (dosing.Request, *model.DeviceCommand, error) {
+	request, ok := p.dosing.Request(requestID)
+	if !ok {
+		return dosing.Request{}, nil, errors.New("dosing request is not found")
 	}
-	return p.dosing.ChangeRate(ctx, change, p.now())
+	p.mu.RLock()
+	state, exists := p.lines[request.LineID]
+	p.mu.RUnlock()
+	if !exists || state.Emergency {
+		return dosing.Request{}, nil, errors.New("process line cannot accept dosing review")
+	}
+	return p.dosing.Review(ctx, requestID, approved, reviewer, note, state.Generation, p.now())
+}
+
+// RevokeDose 撤销已下发的高风险变更，并向总线发布恢复旧值的安全补偿命令。
+func (p *Plant) RevokeDose(ctx context.Context, requestID uuid.UUID, operator, note string) (dosing.Request, model.DeviceCommand, error) {
+	request, ok := p.dosing.Request(requestID)
+	if !ok {
+		return dosing.Request{}, model.DeviceCommand{}, errors.New("dosing request is not found")
+	}
+	p.mu.RLock()
+	state, exists := p.lines[request.LineID]
+	p.mu.RUnlock()
+	if !exists {
+		return dosing.Request{}, model.DeviceCommand{}, errors.New("process line is not found")
+	}
+	return p.dosing.Revoke(ctx, requestID, operator, note, state.Generation, p.now())
+}
+
+func (p *Plant) DoseRequest(requestID uuid.UUID) (dosing.Request, bool) {
+	return p.dosing.Request(requestID)
+}
+
+func (p *Plant) DoseRequests() []dosing.Request {
+	return p.dosing.AllRequests()
+}
+
+func (p *Plant) PendingDoseRequests() []dosing.Request {
+	return p.dosing.PendingRequests()
+}
+
+func (p *Plant) DoseRequestHistory() []dosing.Request {
+	return p.dosing.RequestHistory()
 }
 
 func (p *Plant) UpdateBlanket(lineID model.LineID, level float64) (settling.Snapshot, error) {

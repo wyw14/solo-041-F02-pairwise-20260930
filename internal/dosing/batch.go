@@ -29,18 +29,28 @@ func NewChange(lineID model.LineID, batchID uuid.UUID, chemical string, rate flo
 	}, nil
 }
 
+type ledgerKey struct {
+	lineID   model.LineID
+	chemical string
+}
+
 type Ledger struct {
 	mu      sync.RWMutex
 	changes map[uuid.UUID][]Change
+	current map[ledgerKey]Change
 }
 
 func NewLedger() *Ledger {
-	return &Ledger{changes: make(map[uuid.UUID][]Change)}
+	return &Ledger{
+		changes: make(map[uuid.UUID][]Change),
+		current: make(map[ledgerKey]Change),
+	}
 }
 
 func (l *Ledger) Record(change Change) {
 	l.mu.Lock()
 	l.changes[change.BatchID] = append(l.changes[change.BatchID], change)
+	l.current[ledgerKey{change.LineID, change.Chemical}] = change
 	l.mu.Unlock()
 }
 
@@ -52,4 +62,19 @@ func (l *Ledger) Latest(batchID uuid.UUID) (Change, bool) {
 		return Change{}, false
 	}
 	return values[len(values)-1], true
+}
+
+// CurrentRate 返回某处理线、某药剂最近一次已下发的投加设定。无记录时返回 0。
+func (l *Ledger) CurrentRate(lineID model.LineID, chemical string) (Change, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	change, ok := l.current[ledgerKey{lineID, chemical}]
+	return change, ok
+}
+
+// Clear 清除某处理线、某药剂的当前设定（首次投加被撤销后无在执行设定）。
+func (l *Ledger) Clear(lineID model.LineID, chemical string) {
+	l.mu.Lock()
+	delete(l.current, ledgerKey{lineID, chemical})
+	l.mu.Unlock()
 }

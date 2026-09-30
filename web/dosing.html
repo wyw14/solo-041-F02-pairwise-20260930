@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BioTreat 加药变更</title><link rel="stylesheet" href="/assets/app.css"></head>
+<body>
+<header><div class="brand">BioTreat 工艺联控</div><nav><a href="/process">工艺总控</a><a href="/aeration">曝气调节</a><a aria-current="page" href="/dosing">加药变更</a><a href="/sludge">污泥回流</a><a href="/alarms">异常处置</a></nav></header>
+<main>
+  <div class="page-head"><div><h1>加药剂量变更</h1><div class="muted">普通范围内直接下发；高风险变更须审核通过后才进入设备总线，已下发可撤销并自动补偿</div></div><div class="status"><span class="dot"></span><span id="health">checking</span></div></div>
+  <div class="grid">
+    <section class="panel">
+      <h2>发起剂量变更</h2>
+      <form id="submit">
+        <label>处理线<select name="line"><option>line-1</option><option>line-2</option><option>line-3</option></select></label>
+        <label>关联批次<input name="batch" placeholder="选择处理线后自动带出" required></label>
+        <label>药剂<select name="chemical"><option value="pac">pac 聚合氯化铝</option><option value="pam">pam 絮凝剂</option><option value="naclo">naclo 次氯酸钠</option><option value="carbon">carbon 碳源</option><option value="phosphate">phosphate 磷酸盐</option></select></label>
+        <label>新设定 (L/h)<input name="rate" type="number" min="0.1" step="0.1" value="60" required></label>
+        <label>申请人<input name="operator" value="operator-a" required></label>
+        <label>变更说明<input name="note" value="根据进水水质调整"></label>
+        <button>提交变更</button>
+      </form>
+    </section>
+    <section class="panel wide">
+      <h2>待审核申请</h2>
+      <form id="reviewer" style="grid-template-columns:1fr auto;align-items:end;display:grid;gap:10px;margin-bottom:12px">
+        <label>审核/撤销操作人<input name="reviewer" value="shift-lead" required></label><span class="muted">批准、驳回、撤销均需署名</span>
+      </form>
+      <div class="rows" id="pending"><div class="muted">暂无待审核申请</div></div>
+    </section>
+    <section class="panel wide">
+      <h2>申请记录（旧值 → 新值 / 药剂 / 批次）</h2>
+      <table>
+        <thead><tr><th>时间</th><th>处理线</th><th>药剂</th><th>批次</th><th>旧值</th><th>新值</th><th>风险</th><th>状态</th><th>申请人</th><th>审核人</th><th>操作</th></tr></thead>
+        <tbody id="requests"></tbody>
+      </table>
+    </section>
+    <section class="panel wide"><h2>最近操作结果</h2><pre id="output">等待操作</pre></section>
+  </div>
+</main>
+<script src="/assets/common.js"></script><script>
+const RISK_TEXT={normal:"普通",high:"高风险"};
+const STATUS_TEXT={pending:"待审核",approved:"已批准",rejected:"已驳回",revoked:"已撤销",expired:"已失效"};
+const STATUS_COLOR={pending:"#b8860b",approved:"#206c63",rejected:"#607179",revoked:"#a63e37",expired:"#607179"};
+function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function shortId(id){return id?id.slice(0,8):"-"}
+async function loadLines(){
+  const data=await request('/api/process-lines');
+  window.__lines=data.lines||[];
+  const line=document.querySelector('#submit [name=line]').value;
+  const found=window.__lines.find(x=>x.line_id===line);
+  const batchInput=document.querySelector('#submit [name=batch]');
+  if(found&&found.batch_id){batchInput.value=found.batch_id}
+}
+document.querySelector('#submit [name=line]').addEventListener('change',loadLines);
+function reviewerName(){return document.querySelector('#reviewer [name=reviewer]').value||"shift-lead"}
+async function loadRequests(){
+  const data=await request('/api/dosing/requests?history=1');
+  const pending=data.pending||[];
+  document.querySelector('#pending').innerHTML=pending.length?pending.map(r=>`
+    <div class="row" style="display:block;border:1px solid #e0d3a4;border-radius:5px;padding:11px;margin-bottom:9px;background:#fdf9ee">
+      <div style="display:flex;justify-content:space-between;gap:10px;margin-bottom:6px">
+        <strong>${esc(r.chemical)} · ${esc(r.line_id)} · 批次 ${shortId(r.batch_id)}</strong>
+        <span style="color:#a63e37;font-weight:700">高风险</span>
+      </div>
+      <div style="margin-bottom:6px">投加设定 <del>${r.old_rate||0}</del> → <strong>${r.new_rate}</strong> L/h；申请人 ${esc(r.requested_by)}；代际 ${r.generation}</div>
+      <div class="muted" style="margin-bottom:8px">${(r.risk_reasons||[]).map(esc).join('；')||'超出普通便捷范围'}</div>
+      ${r.request_note?`<div class="muted" style="margin-bottom:8px">说明：${esc(r.request_note)}</div>`:""}
+      <div style="display:flex;gap:8px">
+        <button data-action="approve" data-id="${r.id}">批准并下发</button>
+        <button class="danger" data-action="reject" data-id="${r.id}">驳回</button>
+      </div>
+    </div>`).join(''):'<div class="muted">暂无待审核申请</div>';
+  const rows=(data.requests||[]).slice().reverse();
+  document.querySelector('#requests').innerHTML=rows.map(r=>`
+    <tr>
+      <td>${new Date(r.created_at).toLocaleString()}</td>
+      <td>${esc(r.line_id)}</td>
+      <td>${esc(r.chemical)}</td>
+      <td title="${esc(r.batch_id)}">${shortId(r.batch_id)}</td>
+      <td>${r.old_rate||"-"}</td>
+      <td><strong>${r.new_rate}</strong></td>
+      <td style="color:${r.risk==="high"?"#a63e37":"#206c63"}">${RISK_TEXT[r.risk]||r.risk}</td>
+      <td style="color:${STATUS_COLOR[r.status]||"#172027"}">${STATUS_TEXT[r.status]||r.status}</td>
+      <td>${esc(r.requested_by)}</td>
+      <td>${esc(r.reviewed_by)||"-"}</td>
+      <td>${r.status==="approved"?`<button class="danger" data-action="revoke" data-id="${r.id}">撤销</button>`:"-"}</td>
+    </tr>`).join('');
+}
+document.querySelector('#submit').addEventListener('submit',async e=>{
+  e.preventDefault();const f=new FormData(e.target);
+  try{
+    const result=await request('/api/dosing',{method:'POST',body:JSON.stringify({line_id:f.get('line'),batch_id:f.get('batch'),chemical:f.get('chemical'),rate:Number(f.get('rate')),operator:f.get('operator'),note:f.get('note')})});
+    show(result.dispatched
+      ?{dispatched:true,message:"普通范围内变更，已直接下发",command:result.command}
+      :{dispatched:false,message:"高风险变更已登记，等待审核（未进入设备总线）",request:result.request});
+  }catch(err){showError(err)}
+  loadRequests().catch(showError);
+});
+document.addEventListener('click',async e=>{
+  const btn=e.target.closest('button[data-action]');if(!btn)return;
+  const action=btn.dataset.action,id=btn.dataset.id;
+  const path=action==="revoke"?"revoke":"review";
+  const body=action==="revoke"
+    ?{reviewer:reviewerName(),note:action==="revoke"?"现场要求撤销已下发变更":""}
+    :{approved:action==="approve",reviewer:reviewerName(),note:action==="approve"?"审核通过，批准下发":"审核不通过，驳回变更"};
+  try{show(await request(`/api/dosing/requests/${id}/${path}`,{method:'POST',body:JSON.stringify(body)}))}
+  catch(err){showError(err)}
+  loadRequests().catch(showError);
+});
+Promise.all([loadLines(),loadRequests()]).catch(showError);
+</script></body></html>
